@@ -1715,8 +1715,8 @@ if bear and sellalert
 
 //Water Mark
 
-Watermark = table.new(position.bottom_left, 1, 2, border_width = 3)
+//Watermark = table.new(position.bottom_left, 1, 2, border_width = 3)
 
-table.cell(Watermark, 0, 0, text = '@ Premium Vault ', text_color = color.lime, text_size = size.small)
+//table.cell(Watermark, 0, 0, text = '@ Premium Vault ', text_color = color.lime, text_size = size.small)
 
-table.cell(Watermark, 0, 1, text = 'https://t.me/Tradingviewpremiumvault', text_color = color.lime, text_size = size.small) //t.me/Tradingviewpremiumvault', text_color=color.lime, text_size=size.small)
+//table.cell(Watermark, 0, 1, text = 'https://t.me/Tradingviewpremiumvault', text_color = color.lime, text_size = size.small) //t.me/Tradingviewpremiumvault', text_color=color.lime, text_size=size.small)
