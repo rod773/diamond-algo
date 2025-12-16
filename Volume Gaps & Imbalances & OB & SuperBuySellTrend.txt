@@ -1,0 +1,990 @@
+// This work is licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International  
+// https://creativecommons.org/licenses/by-nc-sa/4.0/
+//@version=6
+indicator("Volume Gaps & Imbalances & OB & SuperBuySellTrend", overlay = true, max_boxes_count = 500)
+// ~~ Tooltips {
+var string t1  = "Number of historical bars used to build the volume profile and zero-volume gaps.\nHigher = smoother, more stable profile but heavier on performance."
+var string t2  = "Number of price rows (bins) between the highest and lowest price in the lookback range.\nHigher = more detailed profile, lower = more compact."
+var string t3  = "Price source used when assigning each bar to a price row in the profile (e.g. HLC3, Close)."
+var string t4  = "Horizontal width in bars for the main volume profile drawn to the right of price."
+var string t5  = "Fill color for the bullish portion of each price row (bars where Close > Open)."
+var string t6  = "Fill color for the bearish portion of each price row (bars where Close <= Open)."
+var string t7  = "Background color used to highlight zero-volume price gaps (no traded volume in that row)."
+var string t8  = "Number of stacked sections in the delta panel.\nEach section aggregates Buy/Sell delta for a vertical slice of the full profile."
+var string t9  = "Horizontal width in bars of the delta summary panel."
+var string t10 = "Horizontal gap, in bars, between the main volume profile and the delta panel."
+var string t11 = "Show or hide the Δ (delta) percentage text inside each delta bar."
+var string t12 = "Color used when delta is positive in a section (Buy volume > Sell volume)."
+var string t13 = "Color used when delta is negative in a section (Sell volume > Buy volume)."
+var string t14 = "Background color of the delta panel and neutral areas when there is little or no delta."
+var string t15 = "Text color for the Δ percentage labels inside the delta bars."
+var string t16 = "Minimum visual size of any non-zero delta bar as a fraction of the panel width.\nUse a larger value to keep small deltas visible."
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Settings {
+// ~~ Settings {
+prd         = input.int(200, "Lookback", minval = 50, maxval = 2000, tooltip = t1, group = "Profile Settings")
+rows        = input.int(50, "Rows", minval = 10, maxval = 100, inline = "a", tooltip = t2, group = "Profile Settings")
+src         = input.source(hlc3, "", inline = "a", tooltip = t1 + "\n\n" + t2 + "\n\n" + t3, group = "Profile Settings")
+
+width       = input.int(100, "Profile Placement", minval = 1, maxval = 500, tooltip = t4, group = "Profile Styling")
+bull_color  = input.color(color.new(#11bc08, 40), "Bull Color", inline = "prof_set", tooltip = t5, group = "Profile Styling")
+bear_color  = input.color(color.new(#d00b0b, 30), "Bear Color", inline = "prof_set", tooltip = t6, group = "Profile Styling")
+zone_color  = input.color(color.new(color.navy, 50), "Zero-Volume Zone", inline = "prof_set", tooltip = t5 + "\n\n" + t6 + "\n\n" + t7, group = "Profile Styling")
+
+sum_sections   = input.int(20, "Summary Sections", minval = 1, maxval = 100, tooltip = t8, group = "Delta Summary")
+sum_panel_w    = input.int(40, "Summary Width", minval = 10, maxval = 200, tooltip = t9, group = "Delta Summary")
+sum_gap_x      = input.int(4,  "Gap From Profile", minval = 1, maxval = 50, tooltip = t10, group = "Delta Summary")
+sum_show_label = input.bool(true, "Show Delta Text", tooltip = t11, group = "Delta Summary")
+
+delta_pos_color  = input.color(color.new(color.lime, 20), "Delta Buy Color", tooltip = t12, group = "Delta Styling")
+delta_neg_color  = input.color(color.new(color.red,  20), "Delta Sell Color", tooltip = t13, group = "Delta Styling")
+delta_neutral_bg = input.color(color.new(color.gray, 90), "Delta Neutral BG", tooltip = t14, group = "Delta Styling")
+delta_text_color = input.color(color.white, "Delta Text Color", tooltip = t15, group = "Delta Styling")
+delta_min_frac   = input.float(0.2, "Delta Min Size (fraction of width)", minval = 0.0, maxval = 1.0, step = 0.1, tooltip = t16, group = "Delta Styling")
+//~~}
+
+// ~~ Variables {
+b = bar_index
+
+lvls        = array.new<float>()
+bull_vols   = array.new<float>()
+bear_vols   = array.new<float>()
+zone        = array.new<box>()
+//~~}
+
+// ~~ Main {
+hi = ta.highest(high, prd)
+lo = ta.lowest(low, prd)
+
+if barstate.islast
+    // Clear old boxes & labels
+    for e in box.all
+        e.delete()
+    for l in label.all
+        label.delete(l)
+
+    //Profile Range Box
+    box.new(
+         chart.point.from_index(b-prd,hi),
+         chart.point.from_index(b+width,lo),
+         color.new(chart.fg_color,50),
+         2,
+         line.style_dotted,
+         bgcolor = color(na)
+     )
+
+    // Build levels
+    step = (hi - lo) / rows
+    for i = lo to hi by step
+        lvls.push(i)
+        bull_vols.push(0.0)
+        bear_vols.push(0.0)
+
+    // Volume assignment
+    for i = prd to 0
+        price   = src[i]
+        is_bull = close[i] > open[i]
+        for j = 0 to lvls.size() - 2
+            levelLow  = lvls.get(j)
+            levelHigh = lvls.get(j + 1)
+            if price > levelLow and price <= levelHigh
+                if is_bull
+                    bull_vols.set(j, bull_vols.get(j) + volume[i])
+                else
+                    bear_vols.set(j, bear_vols.get(j) + volume[i])
+                break
+
+    // Calculate maxVol based on total volumes
+    maxVol = 0.0
+    for i = 0 to lvls.size() - 2
+        vol_i = bull_vols.get(i) + bear_vols.get(i)
+        if vol_i > maxVol
+            maxVol := vol_i
+
+    // Create profile
+    for i = 0 to lvls.size() - 2
+        bull_i = bull_vols.get(i)
+        bear_i = bear_vols.get(i)
+        vol_i  = bull_i + bear_i
+        norm_v = maxVol > 0 ? math.round((vol_i / maxVol) * width) : 0
+
+        if norm_v > 0
+            norm_bull  = bull_i > 0 ? math.round((bull_i / vol_i) * norm_v) : 0
+            norm_bear  = norm_v - norm_bull
+            left_start = b + width - norm_v
+
+            // Draw bull box
+            if norm_bull > 0
+                box.new(
+                     left   = left_start,
+                     top    = lvls.get(i + 1),
+                     right  = left_start + norm_bull,
+                     bottom = lvls.get(i),
+                     border_color = color.new(chart.fg_color,90),
+                     bgcolor = bull_color
+                 )
+
+            // Draw bear box
+            if norm_bear > 0
+                box.new(
+                     left   = left_start + norm_bull,
+                     top    = lvls.get(i + 1),
+                     right  = b + width,
+                     bottom = lvls.get(i),
+                     border_color = color.new(chart.fg_color,90),
+                     bgcolor = bear_color
+                 )
+
+        // Zero-volume zone
+        if vol_i == 0
+            zeroBox = box.new(
+                 left   = b - prd,
+                 top    = lvls.get(i + 1),
+                 right  = b,
+                 bottom = lvls.get(i),
+                 border_color = na,
+                 bgcolor = zone_color
+             )
+            zone.push(zeroBox)
+
+    //Zone merge
+    if zone.size() > 1
+        i = 0
+        while i < zone.size()
+            currentBox = zone.get(i)
+            currentTop = currentBox.get_top()
+
+            // Look ahead to find the end of consecutive touching zones
+            j = i + 1
+            while j < zone.size()
+                nextBox = zone.get(j)
+                if math.abs(nextBox.get_bottom() - currentTop) > 1e-10
+                    break
+                currentTop := nextBox.get_top()
+                j += 1
+
+            chainLength = j - i
+
+            if chainLength > 1
+                // Merge all boxes into one big box
+                firstBox = zone.get(i)
+                lastBox  = zone.get(j - 1)
+
+                mergedBox = box.new(
+                     left   = b - prd,
+                     top    = lastBox.get_top(),
+                     right  = b,
+                     bottom = firstBox.get_bottom(),
+                     border_color = na,
+                     bgcolor = zone_color
+                 )
+
+                // Delete old boxes (from last to first to preserve indices while removing)
+                for k = j - 1 to i by 1
+                    boxToDelete = zone.get(k)
+                    boxToDelete.delete()
+                    zone.remove(k)
+
+                // Insert the merged box
+                zone.insert(i, mergedBox)
+
+                // Next iteration starts right after the newly inserted merged box
+                i += 1
+            else
+                // No merge needed, move to next
+                i += 1
+    
+    // Adjust left edges of final zones
+    if zone.size()>0
+        float epsilon = 1e-10
+        for ii = 0 to zone.size() - 1
+            currentBox = zone.get(ii)
+            ztop = currentBox.get_top()
+            zbot = currentBox.get_bottom()
+            left_idx = b - prd
+            for off = prd to 0 by 1
+                if low[off] <= ztop + epsilon and high[off] >= zbot - epsilon or
+                   high[off] >= zbot - epsilon and low[off] <= zbot + epsilon or
+                   low[off] <= zbot + epsilon and high[off] >= ztop - epsilon
+                    left_idx := b - off
+                    break
+            currentBox.set_left(left_idx)
+
+    // Delta
+    lvlCount = lvls.size()
+    rowsUsed = lvlCount > 0 ? lvlCount - 1 : 0
+
+    if rowsUsed > 0 and sum_sections > 0
+        // rows per section
+        secRows = math.max(1, math.floor(rowsUsed / sum_sections))
+
+        baseLeft  = b + width + sum_gap_x
+        baseRight = baseLeft + sum_panel_w
+
+        for s = 0 to sum_sections - 1
+            startIdx = s * secRows
+            endIdx   = s == sum_sections - 1 ? rowsUsed - 1 : math.min(rowsUsed - 1, (s + 1) * secRows - 1)
+
+            if startIdx > endIdx
+                continue
+
+            segBull = 0.0
+            segBear = 0.0
+
+            for j = startIdx to endIdx
+                segBull += bull_vols.get(j)
+                segBear += bear_vols.get(j)
+
+            segTot = segBull + segBear
+            if segTot <= 0
+                continue
+
+            // vertical range of this section
+            segTop    = lvls.get(endIdx + 1)
+            segBottom = lvls.get(startIdx)
+
+            box.new(
+                 left   = baseLeft,
+                 top    = segTop,
+                 right  = baseRight,
+                 bottom = segBottom,
+                 border_color = color.new(chart.fg_color, 70),
+                 bgcolor = delta_neutral_bg
+             )
+
+            // Delta: (Bull - Bear) as % of total => [-100, +100]
+            deltaPct = (segBull - segBear) / segTot * 100.0
+
+            // bar length: abs(delta), with minimum visual size
+            float barLenFrac = 0.0
+            float barLen     = 0.0
+
+            if deltaPct != 0
+                norm       = math.abs(deltaPct) / 100.0
+                barLenFrac := math.max(delta_min_frac, math.min(1.0, norm))
+                barLen     := sum_panel_w * barLenFrac
+            else
+                barLenFrac := 0.0
+                barLen     := 0.0
+
+            // coordinates for the delta bar (always from the left)
+            float dLeft  = baseLeft
+            float dRight = baseLeft + barLen
+
+            // choose color by sign
+            colDelta = delta_neutral_bg
+            if deltaPct > 0
+                colDelta := delta_pos_color
+            else if deltaPct < 0
+                colDelta := delta_neg_color
+
+            // if delta is exactly 0, still draw a very small neutral bar
+            if deltaPct == 0
+                dRight := baseLeft + 1
+
+            // Delta bar (cast x-coordinates to int for box.new)
+            deltaBox = box.new(
+                 left   = int(math.round(dLeft)),
+                 top    = segTop,
+                 right  = int(math.round(dRight)),
+                 bottom = segBottom,
+                 border_color = color.new(chart.fg_color, 20),
+                 bgcolor = colDelta
+             )
+
+            // Text inside the delta bar
+            if sum_show_label
+                txt = "Δ " + str.tostring(deltaPct, "#.0") + "%"
+                box.set_text(deltaBox, txt)
+                box.set_text_color(deltaBox, delta_text_color)
+                box.set_text_halign(deltaBox, text.align_center)
+                box.set_text_valign(deltaBox, text.align_center)
+//~~}
+//**************************************************************
+
+tf = input.timeframe(defval = '', title = 'Time-Frame Order-Block')
+linewidth_close = input.int(title = 'Line width Liquidated', defval = 1, minval = 1, maxval = 4, group = 'Display')
+transparency = input.int(title = 'Transparency', defval = 80, minval = 1, maxval = 100, group = 'Display')
+color_buy = input.color(defval = color.green, title = 'Color Bull', group = 'Display')
+color_sell = input.color(defval = color.red, title = 'Color Bear', group = 'Display')
+color_fvg_buy = input.color(defval = color.blue, title = 'Color FVG Bull', group = 'Display')
+color_fvg_sell = input.color(defval = color.orange, title = 'Color FVG Bear', group = 'Display')
+
+show_ob = input.bool(title = 'Show Order-Blocks', defval = true, group = 'Display')
+show_fvg = input.bool(title = 'Show Fair-Value-Gaps', defval = true, group = 'Display')
+show_signals_ob = input.bool(title = 'Show Signals Order-Block', defval = true, group = 'Display')
+show_signals_fvg = input.bool(title = 'Show Signals FVG', defval = true, group = 'Display')
+
+
+min_dist = input.int(title = 'Min dist', defval = 1, minval = 1, group = 'Signals')
+min_dist_fvg = input.int(title = 'Min dist FVG', defval = 1, minval = 1, group = 'Signals')
+use_ha = input.bool(title = 'Use Heikin-Ashi', defval = false, group = 'Signals')
+
+type OB
+	float max
+	float min
+	bool isbull
+	int t = time
+	int idx = bar_index
+
+type FVG
+	float max
+	float min
+	bool isbull
+	int t = time
+	int idx = bar_index
+
+type Signals
+	float candle_open
+	float candle_high
+	float candle_low
+	float candle_close
+	float point
+	bool isbull
+	bool entry = false
+	int idx = bar_index
+	int t = time
+
+detect() =>
+
+    var new_ob = OB.new(na, na, bool(na))
+
+    candle_dir = close > open ? 1 : -1
+    candle_dir_prev = close[1] > open[1] ? 1 : -1
+    detected = false
+
+    if candle_dir == 1 and candle_dir_prev == -1 and high > high[1]
+        new_ob := OB.new(max = high[1], min = low[1], isbull = true)
+        detected := true
+        detected
+
+    if candle_dir == -1 and candle_dir_prev == 1 and low < low[1]
+        new_ob := OB.new(max = high[1], min = low[1], isbull = false)
+        detected := true
+        detected
+    if not show_ob
+        detected := false
+        detected
+    [new_ob, detected, open, high, low, close]
+
+detect_fvg() =>
+
+    var new_fvg = FVG.new(na, na, bool(na))
+
+    candle_dir = close > open ? 1 : -1
+    candle_dir_prev = close[1] > open[1] ? 1 : -1
+    detected = false
+
+    if low > high[2]
+        new_fvg := FVG.new(max = low, min = high[2], isbull = true)
+        detected := true
+        detected
+
+    if low[2] > high
+        new_fvg := FVG.new(max = low[2], min = high, isbull = false)
+        detected := true
+        detected
+
+    if not show_fvg
+        detected := false
+        detected
+    [new_fvg, detected, open, high, low, close]
+
+[new_ob, detected, s_open, s_high, s_low, s_close] = request.security(syminfo.tickerid, tf, detect())
+
+[new_fvg, fvg_detected, fvg_open, fvg_high, fvg_low, fvg_close] = request.security(syminfo.tickerid, tf, detect_fvg())
+
+[ha_open, ha_high, ha_low, ha_close] = request.security(ticker.heikinashi(syminfo.tickerid), tf, [open, high, low, close])
+
+var float max_bull_fvg = na
+var float min_bull_fvg = na
+var bull_count = 0
+var bull_mitigated = 0
+var float max_bear_fvg = na
+var float min_bear_fvg = na
+var bear_count = 0
+var bear_mitigated = 0
+
+n = bar_index
+var t = 0
+var t_fvg = 0
+var ob_records = array.new<OB>(0)
+var ob_boxes = array.new<box>(0)
+var fvg_records = array.new<FVG>(0)
+var fvg_boxes = array.new<box>(0)
+
+color_ob = color.new(new_ob.isbull ? color_buy : color_sell, transparency)
+color_fvg = color.new(new_fvg.isbull ? color_fvg_buy : color_fvg_sell, transparency)
+color_lines = color.new(new_ob.isbull ? color_buy : color_sell, 0)
+color_lines_fvg = color.new(new_fvg.isbull ? color_fvg_buy : color_fvg_sell, 0)
+
+if fvg_detected and new_fvg.t != t_fvg
+    fvg_boxes.unshift(box.new(n - 1, new_fvg.max, bar_index, new_fvg.min, border_color = color_fvg, bgcolor = color_fvg, extend = extend.right))
+    fvg_records.unshift(new_fvg)
+    t_fvg := new_fvg.t
+    t_fvg
+
+if detected and new_ob.t != t
+    ob_boxes.unshift(box.new(n - 1, new_ob.max, bar_index, new_ob.min, border_color = color_ob, bgcolor = color_ob, extend = extend.right))
+    ob_records.unshift(new_ob)
+    t := new_ob.t
+    t
+
+var signal = Signals.new(0)
+var signal_fvg = Signals.new(0)
+
+MS_IN_1H = 1000 * 60 * 1
+if ob_records.size() > 0
+    for i = ob_records.size() - 1 to 0 by 1
+        get = ob_records.get(i)
+
+        if get.isbull
+            if (s_low <= get.max or low <= get.max) and get.t < time // get.idx < bar_index 
+                line.new(get.t, get.max, time, get.max, xloc.bar_time, color = color_buy, style = line.style_dashed, width = linewidth_close)
+                ob_box = ob_boxes.remove(i)
+                ob_box.delete()
+                ob_records.remove(i)
+                if get.idx + min_dist < bar_index
+                    signal := Signals.new(open, high, low, close, get.max, true)
+                    signal
+
+        else
+            if (s_high >= get.min or high >= get.min) and get.t < time //get.idx < bar_index
+                line.new(get.t, get.min, time, get.min, xloc.bar_time, color = color_sell, style = line.style_dashed, width = linewidth_close)
+                ob_box = ob_boxes.remove(i)
+                ob_box.delete()
+                ob_records.remove(i)
+                if get.idx + min_dist < bar_index
+                    signal := Signals.new(open, high, low, close, get.min, false)
+                    signal
+
+if fvg_records.size() > 0
+    for i = fvg_records.size() - 1 to 0 by 1
+        get_fvg = fvg_records.get(i)
+
+        if get_fvg.isbull
+            if (fvg_low <= get_fvg.max or low <= get_fvg.max) and get_fvg.t < time // get.idx < bar_index 
+                line.new(get_fvg.t, get_fvg.max, time, get_fvg.max, xloc.bar_time, color = color_fvg_buy, style = line.style_dashed, width = linewidth_close)
+                fvg_box = fvg_boxes.remove(i)
+                fvg_box.delete()
+                fvg_records.remove(i)
+                if get_fvg.idx + min_dist_fvg < bar_index
+                    signal_fvg := Signals.new(open, high, low, close, get_fvg.max, true)
+                    signal_fvg
+        else
+            if (fvg_high >= get_fvg.min or high >= get_fvg.min) and get_fvg.t < time //get.idx < bar_index
+                line.new(get_fvg.t, get_fvg.min, time, get_fvg.min, xloc.bar_time, color = color_fvg_sell, style = line.style_dashed, width = linewidth_close)
+                fvg_box = fvg_boxes.remove(i)
+                fvg_box.delete()
+                fvg_records.remove(i)
+                if get_fvg.idx + min_dist_fvg < bar_index
+                    signal_fvg := Signals.new(open, high, low, close, get_fvg.min, false)
+                    signal_fvg
+
+candle_dir = close > open ? 1 : -1
+
+cond = 0
+cond_fvg = 0
+
+s_close := use_ha ? ha_close : fvg_close
+if s_close > signal.point and signal.isbull and candle_dir == 1 and not signal.entry
+    signal.entry := true
+    cond := 1
+    cond
+
+if s_close < signal.point and not signal.isbull and candle_dir == -1 and not signal.entry
+    signal.entry := true
+    cond := -1
+    cond
+
+fvg_close := use_ha ? ha_close : fvg_close
+
+if fvg_close > signal_fvg.point and signal_fvg.isbull and candle_dir == 1 and not signal_fvg.entry
+    signal_fvg.entry := true
+    cond_fvg := 1
+    cond_fvg
+
+if fvg_close < signal_fvg.point and not signal_fvg.isbull and candle_dir == -1 and not signal_fvg.entry
+    signal_fvg.entry := true
+    cond_fvg := -1
+    cond_fvg
+
+
+plotshape(cond == 1 ? 1 : 0, 'B', shape.labelup, location.belowbar, text = 'Buy', textcolor = color.white, color = color_buy, size = size.tiny, display = show_signals_ob ? display.all : display.none)
+plotshape(cond == -1 ? -1 : 0, 'S', shape.labeldown, location.abovebar, text = 'Sell', textcolor = color.white, color = color_sell, size = size.tiny, display = show_signals_ob ? display.all : display.none)
+
+plotshape(cond_fvg == 1 ? 1 : 0, 'B', shape.labelup, location.belowbar, text = 'Buy', textcolor = color.white, color = color_fvg_buy, size = size.tiny, display = show_signals_fvg ? display.all : display.none)
+plotshape(cond_fvg == -1 ? -1 : 0, 'S', shape.labeldown, location.abovebar, text = 'Sell', textcolor = color.white, color = color_fvg_sell, size = size.tiny, display = show_signals_fvg ? display.all : display.none)
+
+
+
+//****************************************************
+
+
+
+PP = input.int(5, 'Pivot Period')
+ATR = ta.atr(21)
+var ArrayType = array.new_string()
+var ArrayValue = array.new_float()
+var ArrayIndex = array.new_int()
+var Line = array.new_line()
+
+HighPivot = ta.pivothigh(PP, PP)
+LowPivot = ta.pivotlow(PP, PP)
+
+HighValue = ta.valuewhen(bool(HighPivot), high[PP], 0)
+LowValue = ta.valuewhen(bool(LowPivot), low[PP], 0)
+
+HighIndex = ta.valuewhen(bool(HighPivot), bar_index[PP], 0)
+LowIndex = ta.valuewhen(bool(LowPivot), bar_index[PP], 0)
+
+Correct_HighPivot = 0.0
+Correct_LowPivot = 0.0
+
+PASS = 0
+
+if bool(HighPivot) and bool(LowPivot)
+    if ArrayType.size() == 0
+        PASS := 1
+        PASS
+    else if ArrayType.size() >= 1
+        if ArrayType.get(ArrayType.size() - 1) == 'L' or ArrayType.get(ArrayType.size() - 1) == 'LL'
+            if LowPivot < ArrayValue.get(ArrayType.size() - 1)
+                array.remove(ArrayType, ArrayType.size() - 1)
+                array.remove(ArrayValue, ArrayValue.size() - 1)
+                array.remove(ArrayIndex, ArrayIndex.size() - 1)
+                array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < LowValue ? 'HL' : 'LL' : 'L') ///////////////////////////////Here
+                array.push(ArrayValue, LowValue)
+                array.push(ArrayIndex, LowIndex)
+                Correct_LowPivot := LowValue
+                Correct_LowPivot
+            else
+                array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < HighValue ? 'HH' : 'LH' : 'H') ///////////////////////////////Here
+                array.push(ArrayValue, HighValue)
+                array.push(ArrayIndex, HighIndex)
+            Correct_HighPivot := HighValue
+            Correct_HighPivot
+        else if ArrayType.get(ArrayType.size() - 1) == 'H' or ArrayType.get(ArrayType.size() - 1) == 'HH'
+            if HighPivot > ArrayValue.get(ArrayType.size() - 1)
+                array.remove(ArrayType, ArrayType.size() - 1)
+                array.remove(ArrayValue, ArrayValue.size() - 1)
+                array.remove(ArrayIndex, ArrayIndex.size() - 1)
+                array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < HighValue ? 'HH' : 'LH' : 'H') ///////////////////////////////Here
+                array.push(ArrayValue, HighValue)
+                array.push(ArrayIndex, HighIndex)
+                Correct_HighPivot := HighValue
+                Correct_HighPivot
+            else
+                array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < LowValue ? 'HL' : 'LL' : 'L') ///////////////////////////////Here
+                array.push(ArrayValue, LowValue)
+                array.push(ArrayIndex, LowIndex)
+            Correct_LowPivot := LowValue
+            Correct_LowPivot
+        else if ArrayType.get(ArrayType.size() - 1) == 'LH'
+            if HighPivot < ArrayValue.get(ArrayType.size() - 1)
+                array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < LowValue ? 'HL' : 'LL' : 'L') ///////////////////////////////Here
+                array.push(ArrayValue, LowValue)
+                array.push(ArrayIndex, LowIndex)
+                Correct_LowPivot := LowValue
+                Correct_LowPivot
+            else if HighPivot > ArrayValue.get(ArrayType.size() - 1)
+                if close < ArrayValue.get(ArrayType.size() - 1)
+                    array.remove(ArrayType, ArrayType.size() - 1)
+                    array.remove(ArrayValue, ArrayValue.size() - 1)
+                    array.remove(ArrayIndex, ArrayIndex.size() - 1)
+                    array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < HighValue ? 'HH' : 'LH' : 'H') ///////////////////////////////Here
+                    array.push(ArrayValue, HighValue)
+                    array.push(ArrayIndex, HighIndex)
+                    Correct_HighPivot := HighValue
+                    Correct_HighPivot
+                else if close > ArrayValue.get(ArrayType.size() - 1)
+                    array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < LowValue ? 'HL' : 'LL' : 'L') ///////////////////////////////Here
+                    array.push(ArrayValue, LowValue)
+                    array.push(ArrayIndex, LowIndex)
+                    Correct_LowPivot := LowValue
+                    Correct_LowPivot
+        else if ArrayType.get(ArrayType.size() - 1) == 'HL'
+            if LowPivot > ArrayValue.get(ArrayType.size() - 1)
+                array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < HighValue ? 'HH' : 'LH' : 'H') ///////////////////////////////Here
+                array.push(ArrayValue, HighValue)
+                array.push(ArrayIndex, HighIndex)
+                Correct_HighPivot := HighValue
+                Correct_HighPivot
+            else if LowPivot < ArrayValue.get(ArrayType.size() - 1)
+                if close > ArrayValue.get(ArrayType.size() - 1)
+                    array.remove(ArrayType, ArrayType.size() - 1)
+                    array.remove(ArrayValue, ArrayValue.size() - 1)
+                    array.remove(ArrayIndex, ArrayIndex.size() - 1)
+                    array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < LowValue ? 'HL' : 'LL' : 'L') ///////////////////////////////Here
+                    array.push(ArrayValue, LowValue)
+                    array.push(ArrayIndex, LowIndex)
+                    Correct_LowPivot := LowValue
+                    Correct_LowPivot
+                else if close < ArrayValue.get(ArrayType.size() - 1)
+                    array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < HighValue ? 'HH' : 'LH' : 'H') ///////////////////////////////Here
+                    array.push(ArrayValue, HighValue)
+                    array.push(ArrayIndex, HighIndex)
+                    Correct_HighPivot := HighValue
+                    Correct_HighPivot
+else if bool(HighPivot)
+    if ArrayType.size() == 0
+        array.insert(ArrayType, 0, 'H')
+        array.insert(ArrayValue, 0, HighValue)
+        array.insert(ArrayIndex, 0, HighIndex)
+        Correct_HighPivot := HighValue
+        Correct_HighPivot
+    else if ArrayType.size() >= 1
+        if ArrayType.get(ArrayType.size() - 1) == 'L' or ArrayType.get(ArrayType.size() - 1) == 'HL' or ArrayType.get(ArrayType.size() - 1) == 'LL'
+            if HighPivot > ArrayValue.get(ArrayType.size() - 1)
+                array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < HighValue ? 'HH' : 'LH' : 'H') ///////////////////////////////Here
+                array.push(ArrayValue, HighValue)
+                array.push(ArrayIndex, HighIndex)
+                Correct_HighPivot := HighValue
+                Correct_HighPivot
+            else if HighPivot < ArrayValue.get(ArrayType.size() - 1)
+                array.remove(ArrayType, ArrayType.size() - 1)
+                array.remove(ArrayValue, ArrayValue.size() - 1)
+                array.remove(ArrayIndex, ArrayIndex.size() - 1)
+                array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < LowValue ? 'HL' : 'LL' : 'L') ///////////////////////////////Here
+                array.push(ArrayValue, LowValue)
+                array.push(ArrayIndex, LowIndex)
+                Correct_LowPivot := LowValue
+                Correct_LowPivot
+        else if ArrayType.get(ArrayType.size() - 1) == 'H' or ArrayType.get(ArrayType.size() - 1) == 'HH' or ArrayType.get(ArrayType.size() - 1) == 'LH'
+            if ArrayValue.get(ArrayValue.size() - 1) < HighValue
+                array.remove(ArrayType, ArrayType.size() - 1)
+                array.remove(ArrayValue, ArrayValue.size() - 1)
+                array.remove(ArrayIndex, ArrayIndex.size() - 1)
+                array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < HighValue ? 'HH' : 'LH' : 'H') ///////////////////////////////Here
+                array.push(ArrayValue, HighValue)
+                array.push(ArrayIndex, HighIndex)
+                Correct_HighPivot := HighValue
+                Correct_HighPivot
+else if bool(LowPivot)
+    if ArrayType.size() == 0
+        array.insert(ArrayType, 0, 'L')
+        array.insert(ArrayValue, 0, LowValue)
+        array.insert(ArrayIndex, 0, LowIndex)
+        Correct_LowPivot := LowValue
+        Correct_LowPivot
+    else if ArrayType.size() >= 1
+        if ArrayType.get(ArrayType.size() - 1) == 'H' or ArrayType.get(ArrayType.size() - 1) == 'HH' or ArrayType.get(ArrayType.size() - 1) == 'LH'
+            if LowPivot < ArrayValue.get(ArrayType.size() - 1)
+                array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < LowValue ? 'HL' : 'LL' : 'L') ///////////////////////////////Here
+                array.push(ArrayValue, LowValue)
+                array.push(ArrayIndex, LowIndex)
+                Correct_LowPivot := LowValue
+                Correct_LowPivot
+            else if LowPivot > ArrayValue.get(ArrayType.size() - 1)
+                array.remove(ArrayType, ArrayType.size() - 1)
+                array.remove(ArrayValue, ArrayValue.size() - 1)
+                array.remove(ArrayIndex, ArrayIndex.size() - 1)
+                array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < HighValue ? 'HH' : 'LH' : 'H') ///////////////////////////////Here
+                array.push(ArrayValue, HighValue)
+                array.push(ArrayIndex, HighIndex)
+                Correct_HighPivot := HighValue
+                Correct_HighPivot
+        else if ArrayType.get(ArrayType.size() - 1) == 'L' or ArrayType.get(ArrayType.size() - 1) == 'HL' or ArrayType.get(ArrayType.size() - 1) == 'LL'
+            if ArrayValue.get(ArrayValue.size() - 1) > LowValue
+                array.remove(ArrayType, ArrayType.size() - 1)
+                array.remove(ArrayValue, ArrayValue.size() - 1)
+                array.remove(ArrayIndex, ArrayIndex.size() - 1)
+                array.push(ArrayType, ArrayType.size() > 2 ? ArrayValue.get(ArrayType.size() - 2) < LowValue ? 'HL' : 'LL' : 'L') ///////////////////////////////Here
+                array.push(ArrayValue, LowValue)
+                array.push(ArrayIndex, LowIndex)
+                Correct_LowPivot := LowValue
+                Correct_LowPivot
+
+QMDetector() =>
+//Bearish QM
+
+    var string TH1 = ''
+    var string TH2 = ''
+    var string TH3 = ''
+    var string TH4 = ''
+    var string TH5 = ''
+
+    var int IH = 0
+    var int IH1 = 0
+    var int IH2 = 0
+    var int IH3 = 0
+    var int IH4 = 0
+    var int IH5 = 0
+
+    var float VH1 = 0.0
+    var float VH2 = 0.0
+    var float VH3 = 0.0
+    var float VH4 = 0.0
+    var float VH5 = 0.0
+
+    var bool BearQM = false
+
+//Bullish QM
+
+    var string TL1 = ''
+    var string TL2 = ''
+    var string TL3 = ''
+    var string TL4 = ''
+    var string TL5 = ''
+
+    var int IL = 0
+    var int IL1 = 0
+    var int IL2 = 0
+    var int IL3 = 0
+    var int IL4 = 0
+    var int IL5 = 0
+
+    var float VL1 = 0.0
+    var float VL2 = 0.0
+    var float VL3 = 0.0
+    var float VL4 = 0.0
+    var float VL5 = 0.0
+
+    var bool BullQM = false
+
+    if ArrayType.size() > 5
+        TH1 := ArrayType.get(ArrayType.size() - 1)
+        TH2 := ArrayType.get(ArrayType.size() - 2)
+        TH3 := ArrayType.get(ArrayType.size() - 3)
+        TH4 := ArrayType.get(ArrayType.size() - 4)
+        TH5 := ArrayType.get(ArrayType.size() - 5)
+        IH := ArrayIndex.get(ArrayType.size() - 1)
+
+        IH1 := ArrayIndex.get(ArrayType.size() - 1)
+        IH2 := ArrayIndex.get(ArrayType.size() - 2)
+        IH3 := ArrayIndex.get(ArrayType.size() - 3)
+        IH4 := ArrayIndex.get(ArrayType.size() - 4)
+        IH5 := ArrayIndex.get(ArrayType.size() - 5)
+
+        VH1 := ArrayValue.get(ArrayType.size() - 1)
+        VH2 := ArrayValue.get(ArrayType.size() - 2)
+        VH3 := ArrayValue.get(ArrayType.size() - 3)
+        VH4 := ArrayValue.get(ArrayType.size() - 4)
+        VH5 := ArrayValue.get(ArrayType.size() - 5)
+        VH5
+
+    if ArrayType.size() > 5
+        TL1 := ArrayType.get(ArrayType.size() - 1)
+        TL2 := ArrayType.get(ArrayType.size() - 2)
+        TL3 := ArrayType.get(ArrayType.size() - 3)
+        TL4 := ArrayType.get(ArrayType.size() - 4)
+        TL5 := ArrayType.get(ArrayType.size() - 5)
+
+        IL := ArrayIndex.get(ArrayType.size() - 1)
+        IL1 := ArrayIndex.get(ArrayType.size() - 1)
+        IL2 := ArrayIndex.get(ArrayType.size() - 2)
+        IL3 := ArrayIndex.get(ArrayType.size() - 3)
+        IL4 := ArrayIndex.get(ArrayType.size() - 4)
+        IL5 := ArrayIndex.get(ArrayType.size() - 5)
+
+        VL1 := ArrayValue.get(ArrayType.size() - 1)
+        VL2 := ArrayValue.get(ArrayType.size() - 2)
+        VL3 := ArrayValue.get(ArrayType.size() - 3)
+        VL4 := ArrayValue.get(ArrayType.size() - 4)
+        VL5 := ArrayValue.get(ArrayType.size() - 5)
+        VL5
+
+    //Bearish QM
+    var BearQM_Start = 0.0
+    var BearQM_End = 0.0
+    var BearQM_Index = 0.0
+    var CheckBe = 0
+    if TH1 == 'LL' and TH2 == 'HH' and TH3 == 'HL' and TH4 == 'HH' and VH5 < VH1 and IH == bar_index - PP and CheckBe == 0
+        BearQM := true
+        BearQM_Start := VH2
+        BearQM_End := VH1
+        BearQM_Index := IH
+        CheckBe := 1
+        CheckBe
+    else
+        BearQM := false
+        BearQM
+    if BearQM_Start != VH2
+        CheckBe := 0
+        CheckBe
+
+
+    //Bullish QM
+    var BullQM_Start = 0.0
+    var BullQM_End = 0.0
+    var BullQM_Index = 0
+    var CheckBu = 0
+    if TL1 == 'HH' and TL2 == 'LL' and TL3 == 'LH' and TL4 == 'LL' and VL5 > VL1 and IL == bar_index - PP and CheckBu == 0
+        BullQM := true
+        BullQM_Start := VL2
+        BullQM_End := VL1
+        BullQM_Index := IL
+        CheckBu := 1
+        CheckBu
+    else
+        BullQM := false
+        BullQM
+
+    if BullQM_Start != VL2
+        CheckBu := 0
+        CheckBu
+
+    var line BuLeg1 = na
+    var line BuLeg2 = na
+    var line BuLeg3 = na
+    var line BuLeg4 = na
+    var line BuLeg5 = na
+    var line BuEntryLine = na
+    var line BuSLLine = na
+    var line BuTP1Line = na
+    var line BuTP2Line = na
+    var label BuEntryLabel = na
+    var label BuSLLabel = na
+    var label BuTP1Label = na
+    var label BuTP2Label = na
+    BuMove = (IL2 - IL4) / 2
+
+    var line BeLeg1 = na
+    var line BeLeg2 = na
+    var line BeLeg3 = na
+    var line BeLeg4 = na
+    var line BeLeg5 = na
+    var line BeEntryLine = na
+    var line BeSLLine = na
+    var line BeTP1Line = na
+    var line BeTP2Line = na
+    var label BeEntryLabel = na
+    var label BeSLLabel = na
+    var label BeTP1Label = na
+    var label BeTP2Label = na
+    BeMove = (IH2 - IH4) / 2
+
+    if BullQM
+        // BuMove := (IL2 - IL5) * 2 + 6
+        BuLeg1 := line.new(IL5, VL5, IL4, VL4, color = color.rgb(38, 150, 41), width = 2)
+        BuLeg2 := line.new(IL4, VL4, IL3, VL3, color = color.rgb(38, 150, 41), width = 2)
+        BuLeg3 := line.new(IL3, VL3, IL2, VL2, color = color.rgb(38, 150, 41), width = 2)
+        BuLeg4 := line.new(IL2, VL2, IL1, VL1, color = color.rgb(38, 150, 41), width = 2)
+        BuLeg5 := line.new(IL1, VL1, IL1 + BuMove - 2, VL4, color = color.rgb(4, 215, 252), width = 2, style = line.style_arrow_right)
+        BuEntryLine := line.new(IL4, VL4, IL1 + BuMove, VL4, color = color.rgb(0, 0, 0), width = 1, style = line.style_dotted)
+        BuSLLine := line.new(IL2, VL2 - ATR / 2, IL1 + BuMove, VL2 - ATR / 2, color = color.rgb(170, 29, 29), width = 1, style = line.style_dotted)
+        BuTP1Line := line.new(IL3, VL3, IL1 + BuMove, VL3, color = color.rgb(91, 172, 74), width = 1, style = line.style_dotted)
+        BuTP2Line := line.new(IL1, VL1, IL1 + BuMove, VL1, color = color.rgb(91, 172, 74), width = 1, style = line.style_dotted)
+        BuEntryLabel := label.new(IL1 + BuMove + 1, VL4, 'Entry', color = color.rgb(255, 255, 255, 100), style = label.style_text_outline)
+        BuSLLabel := label.new(IL1 + BuMove + 1, VL2 - ATR / 2, 'SL', color = color.rgb(255, 255, 255, 100), style = label.style_text_outline)
+        BuTP1Label := label.new(IL1 + BuMove + 1, VL3, 'TP1', color = color.rgb(255, 255, 255, 100), style = label.style_text_outline)
+        BuTP2Label := label.new(IL1 + BuMove + 1, VL1, 'TP2', color = color.rgb(255, 255, 255, 100), style = label.style_text_outline)
+        BuTP2Label
+
+    if BearQM
+        BeLeg1 := line.new(IH5, VH5, IH4, VH4, color = color.rgb(170, 29, 29), width = 2)
+        BeLeg2 := line.new(IH4, VH4, IH3, VH3, color = color.rgb(170, 29, 29), width = 2)
+        BeLeg3 := line.new(IH3, VH3, IH2, VH2, color = color.rgb(170, 29, 29), width = 2)
+        BeLeg4 := line.new(IH2, VH2, IH1, VH1, color = color.rgb(170, 29, 29), width = 2)
+        BeLeg5 := line.new(IH1, VH1, IH1 + BeMove - 2, VH4, color = color.rgb(252, 173, 4), width = 2, style = line.style_arrow_right)
+        BeEntryLine := line.new(IH4, VH4, IH1 + BeMove, VH4, color = color.rgb(0, 0, 0), width = 1, style = line.style_dotted)
+        BeSLLine := line.new(IH2, VH2 + ATR / 2, IH1 + BeMove, VH2 + ATR / 2, color = color.rgb(170, 29, 29), width = 1, style = line.style_dotted)
+        BeTP1Line := line.new(IH3, VH3, IH1 + BeMove, VH3, color = color.rgb(91, 172, 74), width = 1, style = line.style_dotted)
+        BeTP2Line := line.new(IH1, VH1, IH1 + BeMove, VH1, color = color.rgb(91, 172, 74), width = 1, style = line.style_dotted)
+        BeEntryLabel := label.new(IH1 + BeMove + 1, VH4, 'Entry', color = color.rgb(255, 255, 255, 100), style = label.style_text_outline)
+        BeSLLabel := label.new(IH1 + BeMove + 1, VH2 + ATR / 2, 'SL', color = color.rgb(255, 255, 255, 100), style = label.style_text_outline)
+        BeTP1Label := label.new(IH1 + BeMove + 1, VH3, 'TP1', color = color.rgb(255, 255, 255, 100), style = label.style_text_outline)
+        BeTP2Label := label.new(IH1 + BeMove + 1, VH1, 'TP2', color = color.rgb(255, 255, 255, 100), style = label.style_text_outline)
+        BeTP2Label
+
+
+QMDetector()
+
+
+
+//*************************************************************************
+
+
+
+// ATR setup
+Periods      = input.int(title='ATR Period', defval=10)
+src1          = input.source(hl2, title='Source')
+Multiplier1  = input.float(title='ATR Multiplier 1', step=0.1, defval=0.8)
+Multiplier2  = input.float(title='ATR Multiplier 2', step=0.1, defval=1.6)
+changeATR    = input.bool(title='Change ATR Calculation Method ?', defval=true)
+showsignals  = input.bool(title='Show Buy/Sell Signals ?', defval=true)
+highlighting = input.bool(title='Highlighter On/Off ?', defval=true)
+
+atr2 = ta.sma(ta.tr, Periods)
+atr  = changeATR ? ta.atr(Periods) : atr2
+
+// Initial buy/sell signals
+up  = src - Multiplier1 * atr
+up1 = nz(up[1], up)
+up  := close[1] > up1 ? math.max(up, up1) : up
+
+dn  = src1 + Multiplier1 * atr
+dn1 = nz(dn[1], dn)
+dn  := close[1] < dn1 ? math.min(dn, dn1) : dn
+
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+
+upPlot = plot(trend == 1 ? up : na, title='Up Trend', style=plot.style_linebr, linewidth=2, color=color.new(color.green, 0))
+buySignal = trend == 1 and trend[1] == -1
+plotshape(buySignal ? up : na, title='UpTrend Begins', location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(color.green, 0))
+plotshape(buySignal and showsignals ? up : na, title='Buy', text='Buy', location=location.absolute, style=shape.labelup, size=size.tiny, color=color.new(color.green, 0), textcolor=color.new(color.white, 0))
+
+dnPlot = plot(trend == 1 ? na : dn, title='Down Trend', style=plot.style_linebr, linewidth=2, color=color.new(color.red, 0))
+sellSignal = trend == -1 and trend[1] == 1
+plotshape(sellSignal ? dn : na, title='DownTrend Begins', location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(color.red, 0))
+plotshape(sellSignal and showsignals ? dn : na, title='Sell', text='Sell', location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.new(color.red, 0), textcolor=color.new(color.white, 0))
+
+mPlot = plot(ohlc4, title='', style=plot.style_circles, linewidth=1)
+longFillColor  = highlighting ? (trend == 1 ? color.rgb(76, 175, 79, 78) : color.rgb(255, 255, 255, 76)) : color.rgb(255, 255, 255, 74)
+shortFillColor = highlighting ? (trend == -1 ? color.rgb(255, 82, 82, 79) : color.rgb(255, 255, 255, 72)) : color.rgb(255, 255, 255, 77)
+fill(mPlot, upPlot, title='UpTrend Highlighter', color=longFillColor)
+fill(mPlot, dnPlot, title='DownTrend Highlighter', color=shortFillColor)
+
+alertcondition(buySignal, title='SBST Buy', message='SBST Buy!')
+alertcondition(sellSignal, title='SBST Sell', message='SBST Sell!')
+changeCond = trend != trend[1]
+alertcondition(changeCond, title='SBST Direction Change', message='SBST has changed direction!')
+
+// Confirmation buy/sell signals
+upx  = src1 - Multiplier2 * atr
+upx1 = nz(upx[1], upx)
+upx  := close[1] > upx1 ? math.max(upx, upx1) : upx
+
+dnx  = src1 + Multiplier2 * atr
+dnx1 = nz(dnx[1], dnx)
+dnx  := close[1] < dnx1 ? math.min(dnx, dnx1) : dnx
+
+trendx = 1
+trendx := nz(trendx[1], trendx)
+trendx := trendx == -1 and close > dnx1 ? 1 : trendx == 1 and close < upx1 ? -1 : trendx
+
+upxPlot = plot(trendx == 1 ? upx : na, title='Up Trend Confirm', style=plot.style_linebr, linewidth=2, color=color.rgb(0, 255, 0))
+buySignalx = trendx == 1 and trendx[1] == -1
+plotshape(buySignalx ? upx : na, title='UpTrend Confirmed', location=location.absolute, style=shape.circle, size=size.tiny, color=color.rgb(0, 255, 0))
+plotshape(buySignalx and showsignals ? upx : na, title='Buy Confirm', text='Buy', location=location.absolute, style=shape.labelup, size=size.tiny, color=color.rgb(0, 255, 0), textcolor=color.new(color.black, 0))
+
+dnxPlot = plot(trendx == 1 ? na : dnx, title='Down Trend Confirm', style=plot.style_linebr, linewidth=2, color=color.rgb(255, 0, 0))
+sellSignalx = trendx == -1 and trendx[1] == 1
+plotshape(sellSignalx ? dnx : na, title='DownTrend Confirmed', location=location.absolute, style=shape.circle, size=size.tiny, color=color.rgb(255, 0, 0))
+plotshape(sellSignalx and showsignals ? dnx : na, title='Sell Confirm', text='Sell', location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.rgb(255, 0, 0), textcolor=color.new(color.white, 0))
+
+mxPlot = plot(ohlc4, title='', style=plot.style_circles, linewidth=1)
+longFillColorx  = highlighting ? (trendx == 1 ? color.rgb(76, 175, 79, 72) : color.rgb(255, 255, 255, 69)) : color.rgb(255, 255, 255, 70)
+shortFillColorx = highlighting ? (trendx == -1 ? color.rgb(255, 82, 82, 74) : color.rgb(255, 255, 255, 75)) : color.rgb(255, 255, 255, 76)
+fill(mxPlot, upxPlot, title='UpTrend Highlighter Confirm', color=longFillColorx)
+fill(mxPlot, dnxPlot, title='DownTrend Highlighter Confirm', color=shortFillColorx)
+
+alertcondition(buySignalx, title='SBST Buy Confirm', message='SBST Buy Direction Confirmed!')
+alertcondition(sellSignalx, title='SBST Sell Confirm', message='SBST Sell Direction Confirmed!')
+changeCondx = trendx != trendx[1]
+alertcondition(changeCondx, title='SBST Direction Confirmation', message='SBST has confirmed direction!')
+
+
+//***************************************************************
+
+
+
+
+
+
+
+    
+
